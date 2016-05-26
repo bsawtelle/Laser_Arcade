@@ -41,6 +41,8 @@ unsigned char playerID = 0;
 #define Button GPIO_PIN_4
 #define ButtonInt GPIO_INT_PIN_4
 
+//Sets the pin number for each expander (interrupts were not actually used in the end, most of this does nothing)
+
 #define EXPANDER0_ADDRESS       0x20
 #define EXPANDER0INT_PERIPH     SYSCTL_PERIPH_GPIOE
 #define EXPANDER0INT_BASE       GPIO_PORTE_BASE
@@ -89,42 +91,46 @@ unsigned char playerID = 0;
 #define EXPANDER7INT_GPIO       GPIO_PIN_5
 #define EXPANDER7INT_PIN        GPIO_INT_PIN_5
 
-
+//set MIDI pin assignments
 #define MIDI_RESET_PORT					GPIO_PORTB_BASE
 #define MIDI_RESET_PIN          GPIO_PIN_7
 #define MIDI_UART_PORT          GPIO_PORTB_BASE
 #define MIDI_UART_PIN						GPIO_PIN_1
 
+//Set player pin assignments, only one player was used though, so this wasn't implemented
 #define PLAYER_MUX_GPIO_PERIPH_0    SYSCTL_PERIPH_GPIOF
 #define PLAYER_MUX_GPIO_BASE_0      GPIO_PORTF_BASE
 #define PLAYER_MUX_PIN_0            GPIO_PIN_0
- 
+
 #define PLAYER_MUX_GPIO_PERIPH_1  		SYSCTL_PERIPH_GPIOB
 #define PLAYER_MUX_GPIO_BASE_1    		GPIO_PORTB_BASE
 #define PLAYER_MUX_PIN_1         		  GPIO_PIN_6
 
+//assign each player a 0 based number (wasn't implemented)
 #define PLAYER1            		  0x00
 #define PLAYER2            		  0x01
 #define PLAYER3									0x02
 #define PLAYER4                 0x03
 
 
+//store all of the expander addresses and pins so they can be looped through when needed
  uint8_t const ExpanderAddresses[8] = {EXPANDER0_ADDRESS, EXPANDER1_ADDRESS, EXPANDER2_ADDRESS, EXPANDER3_ADDRESS, EXPANDER4_ADDRESS,
 											EXPANDER5_ADDRESS, EXPANDER6_ADDRESS, EXPANDER7_ADDRESS};
  
 uint8_t const ExpanderIntPins[8] = {EXPANDER0INT_PIN, EXPANDER1INT_PIN, EXPANDER2INT_PIN, EXPANDER3INT_PIN, EXPANDER4INT_PIN,
 											EXPANDER5INT_PIN, EXPANDER6INT_PIN, EXPANDER7INT_PIN};
 
-volatile uint8_t expander_state[8];
-volatile uint8_t past_state[8];
-uint8_t expander_statemask = 0x3f; //lowest 6 bits
-volatile uint8_t note;
-volatile bool new_hit = false;
-volatile bool advance_game_loop = false;
-volatile uint32_t color_select;
-uint32_t colors[] = {RED, YELLOW, BLUE, GREEN, WHITE, YELLOW, CYAN};
-volatile uint8_t count = 0;
-											
+volatile uint8_t expander_state[8]; //current expander state, each element in the array is an expander state which translates to the state of the sensors in a row on the board (i.e. row 0 is expander 0)
+volatile uint8_t past_state[8]; //the previous states, allows the code to look for changes
+uint8_t expander_statemask = 0x3f; //lowest 6 bits (the top two of each expander were floating)
+volatile uint8_t note; //holds the current note that will be played
+volatile bool new_hit = false; //checks if a new "tile" has been hit (new sensor)
+volatile bool advance_game_loop = false; //was used when there was a timer, would allow the screen to be drawn to
+volatile uint32_t color_select; //stores the selected color to be drawn on the screen
+uint32_t colors[] = {RED, YELLOW, BLUE, GREEN, WHITE, YELLOW, CYAN}; //each triggered sensor will draw a colored block determined by the color indexed in the array
+volatile uint8_t count = 0; //the index for the color array, increments every hit block
+			
+//timer interrupt, not actually used											
 void Timer0IntHandler(void){
 
 	//UARTprintf("Time 0\n");
@@ -136,35 +142,18 @@ void Timer0IntHandler(void){
 }
 
 
-
+//initializes UART
 void
 InitConsole(void)
 {
-    //
-    // Enable GPIO port A which is used for UART0 pins.
-    // Enable UART0 so that we can configure the clock.
-    //    
     SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
-		SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
-	
-    //
-    // Configure the pin muxing for UART0 functions on port A0 and A1.
-    // This step is not necessary if your part does not support pin muxing.
-    // Select the alternate (UART) function for these pins.
-    //
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_UART0);
     GPIOPinConfigure(GPIO_PA0_U0RX);
     GPIOPinConfigure(GPIO_PA1_U0TX);
     GPIOPinTypeUART(GPIO_PORTA_BASE, GPIO_PIN_0 | GPIO_PIN_1);
 
-    //
-    // Use the internal 16MHz oscillator as the UART clock source.
-    //
     UARTClockSourceSet(UART0_BASE, UART_CLOCK_PIOSC);
 
-
-    //
-    // Initialize the UART for console I/O.
-    //
     UARTStdioConfig(0, 115200, 16000000);
 }
 
@@ -203,7 +192,7 @@ void InitI2C0(void)
     HWREG(I2C0_BASE + I2C_O_FIFOCTL) = 80008000;
 }
 
-
+//player multiplexing, not actually implemented in hardware
 void SelectPlayer(uint8_t player)
 {
 	uint32_t pinState0;
@@ -224,14 +213,19 @@ void SelectPlayer(uint8_t player)
 	GPIOPinWrite(PLAYER_MUX_GPIO_BASE_1, PLAYER_MUX_PIN_1, pinState1);
 }
 
-/* --------simple version------------*/
+/*this actually gets the top most sensor that was hit (only one should be triggered at a time)
+*by checking through the expander states until a sensor has been triggered, and uses that sensor to turn on
+*an LED block and sound a MIDI note
+*the player argument is not used
+*/
 void getLED(uint8_t player)
 {
 	ClearLEDMap();
-	bool exit = false;
+	bool expander_hit = false;
 	uint32_t color; //player color
-	int scale[6] = {0, 2, 5, 7, 9, 12}; 
-	//change LED color to whatever player 
+	int scale[6] = {0, 2, 5, 7, 9, 12}; //creates a pentatonic scale
+	
+	//change LED color to whatever player (no longer used)
 	if( player == PLAYER1)
 	{
 		color = RED;
@@ -260,11 +254,11 @@ void getLED(uint8_t player)
 					{
 						note = ((11-expander)*12) + scale[bit];
 						SetLEDValue(x, y, 0xFF, color_select);
-						exit = true;
+						expander_hit = true; //
 					}
 				}
 			}
-			if(exit)
+			if(expander_hit)
 			{
 				return;
 			}
@@ -280,10 +274,7 @@ int main(void)
  //Set the clock to 16Mhz
  SysCtlClockSet(SYSCTL_SYSDIV_1|SYSCTL_USE_PLL|SYSCTL_OSC_MAIN|SYSCTL_XTAL_16MHZ);
 	IntMasterDisable();
-  /*
-    No need to enable the button peripheral since it's the same as the LED
-    in this case
-  */
+ 
   SysCtlPeripheralEnable(LED_PERIPH);
   SysCtlDelay(3);
 	SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
@@ -360,7 +351,7 @@ int main(void)
 		MidiSetInstrument(0, 1);
 		
 		
-		
+	//the game loop	
 	while(true)
 	{
 		
@@ -392,7 +383,10 @@ int main(void)
 						
 						
 					}
-		
+					//the expanders are read sort of oddly, so this fixes it
+					//expanders are read into the array as [7,0,1,2,3,4,5,6,]
+					//so this reorganizes the array to [0,1,2,3,4,5,6,7]
+					//each number represents the expander
 					for(int expander = 0; expander < 8; expander++)
 					{
 						if(expander != 0)
@@ -409,28 +403,29 @@ int main(void)
 		}
 		
 	
-		
+		//this function is inaccurately named, but explained above. Gets the LED block and note
 		getLED(player);
 
-			UpdateLEDState();
+			UpdateLEDState(); //draws to the display (lights up the LEDs)
 			
-			advance_game_loop = false;
+			advance_game_loop = false; //not implemented in this system
 		
-		if(new_hit)
+		if(new_hit) //if a new sensor is hit
 		{
-			MidiNoteOn(0, note, 127);
+			MidiNoteOn(0, note, 127); //sound a note 
 		}
 		
-	
-	for(int expander = 0; expander < 8; expander++)
+	//checks if a sesnor has been hit and if there has been, increment the color index	
+	//this should really be done somewhere else, sort of inefficient to do this here
+	for(int expander = 0; expander < 8; expander++) 
 		{
-			past_state[expander] = expander_state[expander];
+			past_state[expander] = expander_state[expander]; 
 			count++;
 		}
-	new_hit = false;
+	new_hit = false; //resets for the next round
 		
-		color_select = colors[count%7];
-	SysCtlDelay(100000);
+		color_select = colors[count%7]; //select color
+	SysCtlDelay(100000); //pause so the game isn't a cacauphony of colors and tones
 
 	}
 }
